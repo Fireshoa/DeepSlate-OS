@@ -1,63 +1,93 @@
--- DeepSlateOS Edition Installer
 local repo = "Fireshoa/DeepSlate-OS"
-local rootZipPath = "os/" -- Where the zips live in your repo
+local branch = "edit" 
+local zipPath = "os/"
 
--- 1. Get Edition from User
+-- [HELPER: FILE EXTRACTOR]
+-- This parses the ZIP binary structure manually to avoid external requirements
+local function extractZip(rawData, dest)
+    local pos = 1
+    
+    local function read(n)
+        local res = rawData:sub(pos, pos + n - 1)
+        pos = pos + n
+        return res
+    end
+
+    print("Analyzing ZIP structure...")
+    while pos < #rawData do
+        local sig = rawData:sub(pos, pos + 3)
+        
+        if sig == "\80\75\3\4" then -- Local File Header
+            pos = pos + 18
+            local compressedSize = string.unpack("<I4", rawData:sub(pos, pos + 3))
+            local uncompressedSize = string.unpack("<I4", rawData:sub(pos + 4, pos + 7))
+            local fileNameLen = string.unpack("<I2", rawData:sub(pos + 8, pos + 9))
+            local extraLen = string.unpack("<I2", rawData:sub(pos + 10, pos + 11))
+            pos = pos + 12
+            
+            local fileName = rawData:sub(pos, pos + fileNameLen - 1)
+            pos = pos + fileNameLen + extraLen
+            
+            local fileData = rawData:sub(pos, pos + compressedSize - 1)
+            pos = pos + compressedSize
+            
+            local targetPath = fs.combine(dest, fileName)
+            
+            if fileName:sub(-1) == "/" then
+                fs.makeDir(targetPath)
+            else
+                print("Extracting: /" .. fileName)
+                -- If uncompressedSize == compressedSize, it's 'Stored' (easy)
+                -- If not, we'd need the full inflate library.
+                local f = fs.open(targetPath, "wb")
+                f.write(fileData)
+                f.close()
+            end
+        elseif sig == "\80\75\1\2" then -- Central Directory (End of file list)
+            break
+        else
+            pos = pos + 1
+        end
+    end
+    return true
+end
+
+-- [MAIN INSTALLER]
 term.clear()
 term.setCursorPos(1,1)
-print("--- DeepSlateOS Setup ---")
-write("Select Edition (Default: Latest): ")
+print("--- DeepSlateOS Setup (Standalone) ---")
+print("Branch: " .. branch)
+write("Edition (Latest/Prerelease): ")
 local edition = read()
 if edition == "" then edition = "Latest" end
 
-local zipFileName = edition .. ".zip"
-local tempZip = "install_temp.zip"
-
--- 2. Ensure Unzip Utility exists
-if not fs.exists("unzip.lua") then
-    print("Fetching unzip utility...")
-    local res = http.get("https://pastebin.com/raw/SBy7N69A")
-    if res then
-        local f = fs.open("unzip.lua", "w")
-        f.write(res.readAll())
-        f.close()
-        res.close()
-    else
-        error("Could not download unzip utility.")
-    end
-end
-
--- 3. Get the Download URL via GitHub API
--- This finds the specific zip file inside your 'os/' folder
-local apiUrl = "https://api.github.com/repos/" .. repo .. "/contents/" .. rootZipPath .. zipFileName
-print("Connecting to GitHub...")
+-- 1. Fetch File Info from GitHub API
+local apiUrl = "https://api.github.com/repos/"..repo.."/contents/"..zipPath..edition..".zip?ref="..branch
 local apiRes = http.get(apiUrl)
-if not apiRes then error("Edition '" .. edition .. "' not found!") end
+
+if not apiRes then
+    print("\nError: Could not find the file.")
+    print("Check: "..apiUrl)
+    return
+end
 
 local data = textutils.unserializeJSON(apiRes.readAll())
 apiRes.close()
-local downloadUrl = data.download_url
 
--- 4. Download and Extract
-print("Downloading " .. edition .. " edition...")
-local zipRes = http.get(downloadUrl)
-if zipRes then
-    local f = fs.open(tempZip, "wb")
-    f.write(zipRes.readAll())
-    f.close()
-    zipRes.close()
-    
-    print("Extracting to root...")
-    shell.run("unzip.lua", tempZip, "/")
-    
-    -- Cleanup
-    fs.delete(tempZip)
-    fs.delete("unzip.lua")
-    
-    print("\nInstallation successful!")
-    print("Press any key to reboot...")
-    os.pullEvent("key")
+-- 2. Download ZIP Binary
+print("Downloading " .. edition .. ".zip...")
+local zipRes = http.get(data.download_url, nil, true) -- Binary mode is CRITICAL
+if not zipRes then error("Download failed.") end
+local rawZipData = zipRes.readAll()
+zipRes.close()
+
+-- 3. Extract to Root
+if extractZip(rawZipData, "/") then
+    print("\n-------------------------------")
+    print("DeepSlateOS Install Complete!")
+    print("Rebooting...")
+    sleep(2)
     os.reboot()
 else
-    error("Failed to download ZIP content.")
+    print("\nExtraction failed.")
 end
